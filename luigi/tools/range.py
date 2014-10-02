@@ -99,7 +99,8 @@ class RangeHourlyBase(luigi.WrapperTask):
         # obey task_limit
         required_datehours = missing_datehours[:self.task_limit]
         # TODO obey reverse
-        logger.debug('Requiring %d missing %s instances in range [%s, %s]' % (len(required_datehours), self.of, required_datehours[0], required_datehours[-1]))
+        if len(required_datehours):
+            logger.debug('Requiring %d missing %s instances in range [%s, %s]' % (len(required_datehours), self.of, required_datehours[0], required_datehours[-1]))
 
         self._cached_requires = [task_cls(d) for d in required_datehours]
         return self._cached_requires
