@@ -92,16 +92,20 @@ class RangeHourlyBase(luigi.WrapperTask):
         else:
             datehours = [self.start + timedelta(hours=h) for h in range(self.range_limit)]
 
-        logger.debug('Checking if range [%s, %s) of %s is complete' % (datehours[0], datehours[-1], self.of))
+        logger.debug('Checking if range [%s, %s] of %s is complete' % (datehours[0], datehours[-1], self.of))
         task_cls = Register.get_task_cls(self.of)
         missing_datehours = self.missing_datehours(task_cls, datehours)
         logger.debug('Range [%s, %s) lacked %d of expected %d %s instances' % (datehours[0], datehours[-1], len(missing_datehours), len(datehours), self.of))
         # obey task_limit
-        required_datehours = missing_datehours[:self.task_limit]
-        # TODO obey reverse
+        if self.reverse:
+            required_datehours = missing_datehours[-self.task_limit:]
+        else:
+            required_datehours = missing_datehours[:self.task_limit]
         if len(required_datehours):
             logger.debug('Requiring %d missing %s instances in range [%s, %s]' % (len(required_datehours), self.of, required_datehours[0], required_datehours[-1]))
 
+        if self.reverse:
+            required_datehours.reverse()  # I wish this determined the order tasks were scheduled or executed, but it doesn't. No priorities in Luigi yet
         self._cached_requires = [task_cls(d) for d in required_datehours]
         return self._cached_requires
 
@@ -109,23 +113,20 @@ class RangeHourlyBase(luigi.WrapperTask):
 class RangeHourly(RangeHourlyBase):
     """Benefits from bulk completeness information to efficiently cover gaps.
 
-    Current implementation requires the datehour to be included in output
-    target's path, and is incompatible with custom complete() or exists(), all
+    The current implementation works for the common case of a task writing
+    output to a FileSystemTarget whose path is built using strftime with format
+    like '...%Y...%m...%d...%H...', without custom complete() or exists(). All
     to efficiently determine missing datehours by filesystem listing.
 
-    Works for the common case of a task writing output to a FileSystemTarget
-    with output path built using strftime with format like
-    '...%Y...%m...%d...%H...'.
+    Convenient to use even from command line, like:
 
-    Intended to be developed to use an explicit API or pick a suitable
+        luigi --module your.module --task RangeHourly --of YourActualTask --start 2014-01-01T00
+
+    Intended to be further developed to use an explicit API or pick a suitable
     heuristic for other types of tasks too, e.g. Postgres exporters...
     (Eventually Luigi could have ranges of completion as first-class citizens.
     Then this listing business could be factored away/be provided for
     explicitly in target API or some kind of a history server.)
-
-    Usage can be in code or command line, like:
-
-        luigi --module your.module --task RangeHourly --of YourActualTask --start 2014-01-01T00
     """
 
     def _get_filesystem(self, task_cls, any_datehour):
@@ -165,7 +166,7 @@ class RangeHourly(RangeHourlyBase):
 
         positions = [Counter((m.start(i), m.end(i)) for m in matches).most_common(1)[0][0] for i in range(1, 5)]  # the most common position of every group is likely to be conclusive hit or miss
 
-        glob = list(paths[0])
+        glob = list(paths[0])  # TODO sanity check that it's the same for all paths?
         for start, end in positions:
             glob = glob[:start] + ['[0-9]'] * (end - start) + glob[end:]
         # return ''.join(glob)
@@ -184,7 +185,7 @@ class RangeHourly(RangeHourlyBase):
 
 
     def missing_datehours(self, task_cls, finite_datehours):
-        """Infers, by listing the task output target's filesystem.
+        """Infers them by listing the task output target's filesystem.
         """
         fs = self._get_filesystem(task_cls, finite_datehours[0])
         # snakebite globbing is slow and spammy, TODO glob coarser and filter later? to speed up
