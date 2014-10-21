@@ -20,7 +20,6 @@ datehours.
 TODO foolproof against that kind of misuse?
 """
 
-from collections import Counter
 from datetime import datetime, timedelta
 import logging
 import luigi
@@ -153,6 +152,16 @@ def _constrain_glob(glob, paths, limit=5):
             del current[g]
 
 
+def most_common(items):
+    """Wanted functionality from Counters (new in Python 2.7)
+    """
+    counts = {}
+    for i in items:
+        counts.setdefault(i, 0)
+        counts[i] += 1
+    return sorted(counts.items(), key=lambda x: x[1])[-1]
+
+
 class RangeHourly(RangeHourlyBase):
     """Benefits from bulk completeness information to efficiently cover gaps.
 
@@ -188,7 +197,7 @@ class RangeHourly(RangeHourlyBase):
             if m is None:
                 raise NotImplementedError("Couldn't deduce datehour representation in output path %r of task %s" % (p, t))
 
-        positions = [Counter((m.start(i), m.end(i)) for m in matches).most_common(1)[0][0] for i in range(1, 5)]  # the most common position of every group is likely to be conclusive hit or miss
+        positions = [most_common((m.start(i), m.end(i)) for m in matches)[0] for i in range(1, 5)]  # the most common position of every group is likely to be conclusive hit or miss
 
         glob = list(paths[0])  # TODO sanity check that it's the same for all paths?
         for start, end in positions:
