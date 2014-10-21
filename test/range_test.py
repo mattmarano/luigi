@@ -94,7 +94,8 @@ class CommonWrapperTask(luigi.WrapperTask):
 
 
 def mock_listdir(_, glob):
-    return fnmatch.filter(mock_contents, glob + '*')
+    for path in fnmatch.filter(mock_contents, glob + '*'):
+        yield path
 
 
 class ConstrainGlobTest(unittest.TestCase):

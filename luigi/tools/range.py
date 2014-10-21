@@ -238,9 +238,9 @@ class RangeHourly(RangeHourlyBase):
         globs = _constrain_glob(glob, paths)
         logger.debug('Listing %s as %r' % (glob, globs))
         time_start = time.time()
-        listing = sum((filesystem.listdir(g) for g in globs), [])
-        logger.debug('Listing took %f s to return %d items' % (time.time() - time_start, len(listing)))
-        return set(listing)
+        listings = [list(filesystem.listdir(g)) for g in globs]
+        logger.debug('Listing took %f s to return %d items' % (time.time() - time_start, sum(map(len, listings))))
+        return set.union(*map(set, listings))
 
     def missing_datehours(self, task_cls, finite_datehours):
         """Infers them by listing the task output target(s) filesystem.
