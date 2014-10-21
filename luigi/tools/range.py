@@ -99,7 +99,7 @@ class RangeHourlyBase(luigi.WrapperTask):
 
         logger.debug('Checking if range [%s, %s] of %s is complete' % (datehours[0], datehours[-1], self.of))
         task_cls = Register.get_task_cls(self.of)
-        missing_datehours = self.missing_datehours(task_cls, datehours)
+        missing_datehours = sorted(self.missing_datehours(task_cls, datehours))
         logger.debug('Range [%s, %s) lacked %d of expected %d %s instances' % (datehours[0], datehours[-1], len(missing_datehours), len(datehours), self.of))
         # obey task_limit
         if self.reverse:
@@ -113,6 +113,45 @@ class RangeHourlyBase(luigi.WrapperTask):
             required_datehours.reverse()  # I wish this determined the order tasks were scheduled or executed, but it doesn't. No priorities in Luigi yet
         self._cached_requires = [task_cls(d) for d in required_datehours]
         return self._cached_requires
+
+
+def _constrain_glob(glob, paths, limit=5):
+    """Tweaks glob into a list of more specific globs that together still cover
+    paths and not too much extra.
+
+    Saves us minutes long listings for long dataset histories.
+
+    Specifically, in this implementation the leftmost occurrences of "[0-9]"
+    give rise to a few separate globs that each specialize the expression to
+    digits that actually occur in paths.
+    """
+
+    def digit_set_wildcard(chars):
+        """Makes a wildcard expression for the set, a bit readable. E.g. [1-5]
+        """
+        chars = sorted(chars)
+        if len(chars) > 1 and ord(chars[-1]) - ord(chars[0]) == len(chars) - 1:
+            return '[%s-%s]' % (chars[0], chars[-1])
+        else:
+            return '[%s]' % ''.join(chars)
+
+    current = {glob: paths}
+    while True:
+        pos = current.keys()[0].find('[0-9]')
+        if pos == -1:
+            # no wildcard expressions left to specialize in the glob
+            return current.keys()
+        char_sets = {}
+        for g, p in current.iteritems():
+            char_sets[g] = sorted(set(path[pos] for path in p))
+        if sum(len(s) for s in char_sets.values()) > limit:
+            return [g.replace('[0-9]', digit_set_wildcard(char_sets[g]), 1) for g in current]
+        for g, s in char_sets.iteritems():
+            for c in s:
+                new_glob = g.replace('[0-9]', c, 1)
+                new_paths = filter(lambda p: p[pos] == c, current[g])
+                current[new_glob] = new_paths
+            del current[g]
 
 
 class RangeHourly(RangeHourlyBase):
@@ -135,22 +174,20 @@ class RangeHourly(RangeHourlyBase):
     """
 
     @classmethod
-    def _get_per_output_glob(_, tasks, outputs, regexes):
+    def _get_per_location_glob(_, tasks, outputs, regexes):
         """Builds a glob listing existing output paths.
 
         Esoteric reverse engineering, but worth it given that (compared to an
         equivalent contiguousness guarantee by naive complete() checks)
         requests to the filesystem are cut by orders of magnitude, and users
         don't even have to retrofit existing tasks anyhow.
-
-        FIXME constrain, as the resulting listing size would tend to infinity.
         """
         paths = [o.path for o in outputs]
         matches = [r.search(p) for r, p in zip(regexes, paths)]  #  naive, because some matches could be confused by numbers earlier in path, e.g. /foo/fifa2000k/bar/2000-12-31/00
 
         for m, p, t in zip(matches, paths, tasks):
             if m is None:
-                raise Exception("Couldn't deduce datehour representation in output path %r of task %s" % (p, t))
+                raise NotImplementedError("Couldn't deduce datehour representation in output path %r of task %s" % (p, t))
 
         positions = [Counter((m.start(i), m.end(i)) for m in matches).most_common(1)[0][0] for i in range(1, 5)]  # the most common position of every group is likely to be conclusive hit or miss
 
@@ -162,7 +199,7 @@ class RangeHourly(RangeHourlyBase):
 
     @classmethod
     def _get_filesystems_and_globs(cls, task_cls):
-        """Returns a (filesystem, glob) tuple per every output location of
+        """Yields a (filesystem, glob) tuple per every output location of
         task_cls.
 
         task_cls can have one or several FileSystemTarget outputs. For
@@ -170,44 +207,51 @@ class RangeHourly(RangeHourlyBase):
         all its dependencies are considered.
         """
         # probe some scattered datehours unlikely to all occur in paths, other than by being sincere datehour parameter's representations
-        # TODO limit to [self.start, self.stop) so messages are less confusing
-        datehours = [datetime(y, m, d, h) for y in range(2000, 2050, 10) for m in range(1, 4) for d in range(5, 8) for h in range(21, 24)]
-        regexes = [re.compile('(%04d).*(%02d).*(%02d).*(%02d)' % (d.year, d.month, d.day, d.hour)) for d in datehours]
-        tasks = [task_cls(d) for d in datehours]
-        # outputs = [flatten(t.output()) for t in tasks]
-        outputs = [flatten_output(t) for t in tasks]
+        # TODO limit to [self.start, self.stop) so messages are less confusing? Done trivially it can kill correctness
+        sample_datehours = [datetime(y, m, d, h) for y in range(2000, 2050, 10) for m in range(1, 4) for d in range(5, 8) for h in range(21, 24)]
+        regexes = [re.compile('(%04d).*(%02d).*(%02d).*(%02d)' % (d.year, d.month, d.day, d.hour)) for d in sample_datehours]
+        sample_tasks = [task_cls(d) for d in sample_datehours]
+        sample_outputs = [flatten_output(t) for t in sample_tasks]
 
-        for o, t in zip(outputs, tasks):
-            if len(o) != len(outputs[0]):
-                raise Exception("Outputs must be consistent over time, sorry; was %r for %r and %r for %r" % (o, t, outputs[0], tasks[0]))
+        for o, t in zip(sample_outputs, sample_tasks):
+            if len(o) != len(sample_outputs[0]):
+                raise NotImplementedError("Outputs must be consistent over time, sorry; was %r for %r and %r for %r" % (o, t, sample_outputs[0], sample_tasks[0]))
                 # TODO fall back on requiring last couple of days? to avoid astonishing blocking when changes like that are deployed
                 # erm, actually it's not hard to test entire hours_back..hours_forward and split into consistent subranges FIXME
             for target in o:
                 if not isinstance(target, FileSystemTarget):
-                    raise Exception("Output targets must be instances of FileSystemTarget; was %r for %r" % (target, t))
+                    raise NotImplementedError("Output targets must be instances of FileSystemTarget; was %r for %r" % (target, t))
 
-        return [(o[0].fs, cls._get_per_output_glob(tasks, o, regexes)) for o in zip(*outputs)]  # outputs transposed, so here we're iterating over logical outputs, not datehours
+        for o in zip(*sample_outputs):  # transposed, so here we're iterating over logical outputs, not datehours
+            glob = cls._get_per_location_glob(sample_tasks, o, regexes)
+            yield o[0].fs, glob
 
     @classmethod
-    def _list_existing(_, filesystem, glob):
+    def _list_existing(_, filesystem, glob, paths):
         logger.debug('Listing %s' % glob)
         time_start = time.time()
         # snakebite globbing is slow and spammy, TODO glob coarser and filter later? to speed up
         #filesystem = luigi.hdfs.HdfsClient()
-        listing = set(filesystem.listdir(glob))
+        listing = []
+        for g in _constrain_glob(glob, paths):
+            listing.extend(filesystem.listdir(g))
         logger.debug('Listing took %f s to return %d items' % (time.time() - time_start, len(listing)))
-        return listing
+        return set(listing)
 
     def missing_datehours(self, task_cls, finite_datehours):
         """Infers them by listing the task output target(s) filesystem.
         """
-        listing = set.union(*[self._list_existing(*fg) for fg in self._get_filesystems_and_globs(task_cls)])
+        filesystems_and_globs_by_location = self._get_filesystems_and_globs(task_cls)
+        paths_by_datehour = [[o.path for o in flatten_output(task_cls(d))] for d in finite_datehours]
+        listing = set()
+        for (f, g), p in zip(filesystems_and_globs_by_location, zip(*paths_by_datehour)):  # transposed, so here we're iterating over logical outputs, not datehours
+            listing |= self._list_existing(f, g, p)
 
         # quickly learn everything that's missing
         missing_datehours = []
-        for d in finite_datehours:
-            if not self.stop or d < self.stop:
-                if any(o.path not in listing for o in flatten_output(task_cls(d))):
+        for d, p in zip(finite_datehours, paths_by_datehour):
+            if not self.stop or d < self.stop:  # hey, TODO in finite_datehours already
+                if not set(p) <= listing:
                     missing_datehours.append(d)
 
         return missing_datehours

@@ -12,8 +12,9 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
+import fnmatch
 import luigi
-from luigi.tools.range import RangeHourly
+from luigi.tools.range import RangeHourly, _constrain_glob
 from luigi.mock import MockFile, MockFileSystem
 import mock
 import unittest
@@ -27,7 +28,7 @@ class CommonDateHourTask(luigi.Task):
         return MockFile(self.dh.strftime('/n2000y01a05n/%Y_%m-_-%daww/21mm%Hdara21/ooo'))
 
 
-mock_listing_a = [
+mock_contents = [
     'TaskA/2014-03-20/18',
     'TaskA/2014-03-20/21',
     'TaskA/2014-03-20/23',
@@ -44,9 +45,6 @@ mock_listing_a = [
     'TaskA/2014-03-21/04.attempt-temp-2014-03-21T13-23-09.078249',
     'TaskA/2014-03-21/12',
     'TaskA/2014-03-23/12',
-]
-
-mock_listing_b = [
     'TaskB/no/worries2014-03-20/23',
     'TaskB/no/worries2014-03-21/01',
     'TaskB/no/worries2014-03-21/03',
@@ -95,11 +93,50 @@ class CommonWrapperTask(luigi.WrapperTask):
         yield TaskB(dh=self.dh, complicator='no/worries')  # str(self.dh) would complicate beyond working
 
 
+def mock_listdir(_, glob):
+    return fnmatch.filter(mock_contents, glob + '*')
+
+
+class ConstrainGlobTest(unittest.TestCase):
+    def test_limit(self):
+        glob = '/[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/[0-9][0-9]'
+        paths = [(datetime.datetime(2013, 12, 31, 5) + datetime.timedelta(hours=h)).strftime('/%Y/%m/%d/%H') for h in xrange(40)]
+        self.assertEqual(sorted(_constrain_glob(glob, paths)), [
+            '/2013/12/31/[0-2][0-9]',
+            '/2014/01/01/[0-2][0-9]',
+        ])
+        paths.pop(26)
+        self.assertEqual(sorted(_constrain_glob(glob, paths, 6)), [
+            '/2013/12/31/0[5-9]',
+            '/2013/12/31/1[0-9]',
+            '/2013/12/31/2[0-3]',
+            '/2014/01/01/0[012345689]',
+            '/2014/01/01/1[0-9]',
+            '/2014/01/01/2[0]',
+        ])
+        self.assertEqual(sorted(_constrain_glob(glob, paths[:7], 10)), [
+            '/2013/12/31/05',
+            '/2013/12/31/06',
+            '/2013/12/31/07',
+            '/2013/12/31/08',
+            '/2013/12/31/09',
+            '/2013/12/31/10',
+            '/2013/12/31/11',
+        ])
+
+    def test_no_wildcards(self):
+        glob = '/2014/01'
+        paths = '/2014/01'
+        self.assertEqual(_constrain_glob(glob, paths), [
+            '/2014/01',
+        ])
+
+
 # class RangeHourlyBaseTest(unittest.TestCase):
 
 class RangeHourlyTest(unittest.TestCase):
     def _test_filesystems_and_globs(self, task_cls, expected):
-        actual = RangeHourly._get_filesystems_and_globs(task_cls)
+        actual = list(RangeHourly._get_filesystems_and_globs(task_cls))
         self.assertEqual(len(actual), len(expected))
         for (actual_filesystem, actual_glob), (expected_filesystem, expected_glob) in zip(actual, expected):
             self.assertTrue(isinstance(actual_filesystem, expected_filesystem))
@@ -114,16 +151,17 @@ class RangeHourlyTest(unittest.TestCase):
             (MockFileSystem, 'TaskB/no/worries[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
         ])
 
-    @mock.patch('luigi.mock.MockFileSystem.listdir', return_value=mock_listing_a)  # fishy to mock the mock, but MockFileSystem doesn't support globs yet
-    def test_missing_tasks_correctly_required(self, mock_listdir):
+    @mock.patch('luigi.mock.MockFileSystem.listdir', new=mock_listdir)  # fishy to mock the mock, but MockFileSystem doesn't support globs yet
+    def test_missing_tasks_correctly_required(self):
         task = RangeHourly(of='TaskA',
                            start=datetime.datetime(2014, 3, 20, 17),
                            task_limit=3,
                            range_limit=365 * 24)  #30 * # the test will break sometime around 2044
         actual = [t.task_id for t in task.requires()]
+        self.assertEqual(str(actual), str(expected_a))
         self.assertEqual(actual, expected_a)
 
-    @mock.patch('luigi.mock.MockFileSystem.listdir', new=lambda _, glob: mock_listing_a if glob.startswith('TaskA') else mock_listing_b)
+    @mock.patch('luigi.mock.MockFileSystem.listdir', new=mock_listdir)
     def test_missing_wrapper_tasks_correctly_required(self):
         task = RangeHourly(of='CommonWrapperTask',
                            start=datetime.datetime(2014, 3, 20, 23),
