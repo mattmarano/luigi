@@ -24,7 +24,6 @@ from collections import Counter
 from datetime import datetime, timedelta
 import logging
 import luigi
-import luigi.hdfs
 from luigi.parameter import ParameterException
 from luigi.target import FileSystemTarget
 from luigi.task import Register, flatten_output
@@ -194,8 +193,7 @@ class RangeHourly(RangeHourlyBase):
         glob = list(paths[0])  # TODO sanity check that it's the same for all paths?
         for start, end in positions:
             glob = glob[:start] + ['[0-9]'] * (end - start) + glob[end:]
-        # return ''.join(glob)
-        return ''.join(glob).rsplit('/', 1)[0]  # chop off the last path item (wouldn't need to if hadoop fs -ls -d equivalent were available)
+        return ''.join(glob).rsplit('/', 1)[0]  # chop off the last path item (wouldn't need to if `hadoop fs -ls -d` equivalent were available)
 
     @classmethod
     def _get_filesystems_and_globs(cls, task_cls):
@@ -228,13 +226,10 @@ class RangeHourly(RangeHourlyBase):
 
     @classmethod
     def _list_existing(_, filesystem, glob, paths):
-        logger.debug('Listing %s' % glob)
+        globs = _constrain_glob(glob, paths)
+        logger.debug('Listing %s as %r' % (glob, globs))
         time_start = time.time()
-        # snakebite globbing is slow and spammy, TODO glob coarser and filter later? to speed up
-        #filesystem = luigi.hdfs.HdfsClient()
-        listing = []
-        for g in _constrain_glob(glob, paths):
-            listing.extend(filesystem.listdir(g))
+        listing = sum((filesystem.listdir(g) for g in globs), [])
         logger.debug('Listing took %f s to return %d items' % (time.time() - time_start, len(listing)))
         return set(listing)
 
