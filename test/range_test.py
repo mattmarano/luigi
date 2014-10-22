@@ -14,7 +14,7 @@
 
 import fnmatch
 import luigi
-from luigi.tools.range import RangeHourly, _constrain_glob
+from luigi.tools.range import RangeHourly, RangeHourlyBase, _constrain_glob
 from luigi.mock import MockFile, MockFileSystem
 import mock
 import unittest
@@ -133,7 +133,31 @@ class ConstrainGlobTest(unittest.TestCase):
         ])
 
 
-# class RangeHourlyBaseTest(unittest.TestCase):
+class RangeHourlyBaseTest(unittest.TestCase):
+    def test_missing_datehours_correctly_interfaced(self):
+        calls = []
+
+        class RangeHourlyDerived(RangeHourlyBase):
+            def missing_datehours(*args):
+                calls.append(args)
+                return args[-1][:5]
+
+        task = RangeHourlyDerived(of='CommonDateHourTask',
+                                  start=datetime.datetime(2014, 3, 20, 17),
+                                  task_limit=4,
+                                  range_limit=365 * 24)  #30 * # the test will break sometime around 2044
+        expected = [
+            'CommonDateHourTask(dh=2014-03-20T17)',
+            'CommonDateHourTask(dh=2014-03-20T18)',
+            'CommonDateHourTask(dh=2014-03-20T19)',
+            'CommonDateHourTask(dh=2014-03-20T20)',
+        ]
+        self.assertEqual(map(str, task.requires()), expected, "should require just 4 (task_limit) tasks, despite missing_datehours returning 5")
+        self.assertEqual(calls[0][1], CommonDateHourTask)
+        self.assertEqual(min(calls[0][2]), datetime.datetime(2014, 3, 20, 17), "should not pass to missing_datehours hours before start")
+        self.assertEqual(map(str, task.requires()), expected)
+        self.assertEqual(len(calls), 1, "subsequent requires() should return the cached result, not call missing_datehours again")
+
 
 class RangeHourlyTest(unittest.TestCase):
     def _test_filesystems_and_globs(self, task_cls, expected):
