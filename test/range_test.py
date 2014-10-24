@@ -13,12 +13,13 @@
 # the License.
 
 import fnmatch
+import datetime
 import luigi
 from luigi.tools.range import RangeHourly, RangeHourlyBase, _constrain_glob
 from luigi.mock import MockFile, MockFileSystem
 import mock
+import time
 import unittest
-import datetime
 
 
 class CommonDateHourTask(luigi.Task):
@@ -133,30 +134,111 @@ class ConstrainGlobTest(unittest.TestCase):
         ])
 
 
+def datetime_to_epoch(dt):
+    td = dt - datetime.datetime(1970, 1, 1)
+    return td.days * 86400 + td.seconds + td.microseconds / 1E6
+
+
 class RangeHourlyBaseTest(unittest.TestCase):
-    def test_missing_datehours_correctly_interfaced(self):
-        calls = []
+    def test_missing_datehours_empty_interval_correctly_interfaced(self):
+        def subcase(kwargs):
+            calls = []
 
-        class RangeHourlyDerived(RangeHourlyBase):
-            def missing_datehours(*args):
-                calls.append(args)
-                return args[-1][:5]
+            class RangeHourlyDerived(RangeHourlyBase):
+                def missing_datehours(*args):
+                    calls.append(args)
+                    return args[-1][:5]
 
-        task = RangeHourlyDerived(of='CommonDateHourTask',
-                                  start=datetime.datetime(2014, 3, 20, 17),
-                                  task_limit=4,
-                                  range_limit=365 * 24)  #30 * # the test will break sometime around 2044
-        expected = [
-            'CommonDateHourTask(dh=2014-03-20T17)',
-            'CommonDateHourTask(dh=2014-03-20T18)',
-            'CommonDateHourTask(dh=2014-03-20T19)',
-            'CommonDateHourTask(dh=2014-03-20T20)',
-        ]
-        self.assertEqual(map(str, task.requires()), expected, "should require just 4 (task_limit) tasks, despite missing_datehours returning 5")
-        self.assertEqual(calls[0][1], CommonDateHourTask)
-        self.assertEqual(min(calls[0][2]), datetime.datetime(2014, 3, 20, 17), "should not pass to missing_datehours hours before start")
-        self.assertEqual(map(str, task.requires()), expected)
-        self.assertEqual(len(calls), 1, "subsequent requires() should return the cached result, not call missing_datehours again")
+            task = RangeHourlyDerived(of='CommonDateHourTask',
+                                      start=datetime.datetime(2014, 3, 20, 17),
+                                      **kwargs)
+            self.assertEqual(task.requires(), [])
+            self.assertEqual(calls, [])
+            self.assertEqual(task.requires(), [])
+            self.assertEqual(calls, [])  # subsequent requires() should return the cached result, never call missing_datehours
+            self.assertTrue(task.complete())
+
+        # nothing to do because start is later
+        subcase({
+            'now': datetime_to_epoch(datetime.datetime(2000, 1, 1, 4)),
+            'hours_back': 4,
+            'hours_forward': 20
+        })
+
+    def test_missing_datehours_nonempty_interval_correctly_interfaced(self):
+        def subcase(kwargs, expected_finite_datehours_range, expected_requires):
+            calls = []
+
+            class RangeHourlyDerived(RangeHourlyBase):
+                def missing_datehours(*args):
+                    calls.append(args)
+                    return args[-1][:7]
+
+            task = RangeHourlyDerived(of='CommonDateHourTask',
+                                      **kwargs)
+            self.assertEqual(map(str, task.requires()), expected_requires)
+            self.assertEqual(calls[0][1], CommonDateHourTask)
+            self.assertEqual((min(calls[0][2]), max(calls[0][2])), expected_finite_datehours_range)
+            self.assertEqual(map(str, task.requires()), expected_requires)
+            self.assertEqual(len(calls), 1)  # subsequent requires() should return the cached result, not call missing_datehours again
+            self.assertFalse(task.complete())
+
+        subcases = [(
+            {
+                'now': datetime_to_epoch(datetime.datetime(2000, 1, 1, 4)),
+                'start': datetime.datetime(1960, 3, 2, 1),
+                'hours_back': 5,
+                'hours_forward': 20
+            },
+            (datetime.datetime(1999, 12, 31, 23), datetime.datetime(2000, 1, 2, 0)),
+            [
+                'CommonDateHourTask(dh=1999-12-31T23)',
+                'CommonDateHourTask(dh=2000-01-01T00)',
+                'CommonDateHourTask(dh=2000-01-01T01)',
+                'CommonDateHourTask(dh=2000-01-01T02)',
+                'CommonDateHourTask(dh=2000-01-01T03)',
+                'CommonDateHourTask(dh=2000-01-01T04)',
+                'CommonDateHourTask(dh=2000-01-01T05)',
+            ]
+        ), (
+            {
+                'now': datetime_to_epoch(datetime.datetime(2014, 10, 22, 12, 4, 29)),
+                'start': datetime.datetime(2014, 3, 20, 17),
+                'task_limit': 4,
+                'hours_back': 365 * 24,
+            },
+            (datetime.datetime(2014, 3, 20, 17), datetime.datetime(2014, 10, 23, 12)),
+            [
+                'CommonDateHourTask(dh=2014-03-20T17)',
+                'CommonDateHourTask(dh=2014-03-20T18)',
+                'CommonDateHourTask(dh=2014-03-20T19)',
+                'CommonDateHourTask(dh=2014-03-20T20)',
+            ]
+        ), (
+            {
+                'now': datetime_to_epoch(datetime.datetime(2015, 10, 22, 12, 4, 29)),
+                'start': datetime.datetime(2014, 3, 20, 17),
+                'task_limit': 4,
+                'hours_back': 365 * 24,
+                'hours_forward': 20,
+            },
+            (datetime.datetime(2014, 10, 22, 12), datetime.datetime(2015, 10, 23, 8)),
+            [
+                'CommonDateHourTask(dh=2014-10-22T12)',
+                'CommonDateHourTask(dh=2014-10-22T13)',
+                'CommonDateHourTask(dh=2014-10-22T14)',
+                'CommonDateHourTask(dh=2014-10-22T15)',
+            ]
+        )]
+
+        durations = []
+        for s in subcases:
+            start_time = time.time()
+            subcase(*s)
+            durations.append(time.time() - start_time)
+        factor = max(durations) / min(durations)
+        self.assertTrue(factor < 5)  # runtimes shouldn't differ too much among cases which have few fixed_datehours passed to missing_datehours, despite hours_back or task_limit being orders of magnitude larger
+        # TODO something reading from disk, to strengthen this kind of a test to be an assertion that existence checks are in fact few
 
 
 class RangeHourlyTest(unittest.TestCase):
@@ -178,19 +260,21 @@ class RangeHourlyTest(unittest.TestCase):
 
     @mock.patch('luigi.mock.MockFileSystem.listdir', new=mock_listdir)  # fishy to mock the mock, but MockFileSystem doesn't support globs yet
     def test_missing_tasks_correctly_required(self):
-        task = RangeHourly(of='TaskA',
+        task = RangeHourly(now=datetime_to_epoch(datetime.datetime(2040, 4, 1)),
+                           of='TaskA',
                            start=datetime.datetime(2014, 3, 20, 17),
                            task_limit=3,
-                           range_limit=365 * 24)  #30 * # the test will break sometime around 2044
+                           hours_back=30 * 365 * 24)  # this test takes around a minute for me. Since stop is not defined, finite_datehours constitute many years to consider
         actual = [t.task_id for t in task.requires()]
         self.assertEqual(str(actual), str(expected_a))
         self.assertEqual(actual, expected_a)
 
     @mock.patch('luigi.mock.MockFileSystem.listdir', new=mock_listdir)
     def test_missing_wrapper_tasks_correctly_required(self):
-        task = RangeHourly(of='CommonWrapperTask',
+        task = RangeHourly(now=datetime_to_epoch(datetime.datetime(2040, 4, 1)),
+                           of='CommonWrapperTask',
                            start=datetime.datetime(2014, 3, 20, 23),
                            stop=datetime.datetime(2014, 3, 21, 6),
-                           range_limit=365 * 24)  #30 * # the test will break sometime around 2044
+                           hours_back=30 * 365 * 24)
         actual = [t.task_id for t in task.requires()]
         self.assertEqual(actual, expected_wrapper)

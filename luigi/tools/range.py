@@ -60,16 +60,20 @@ class RangeHourlyBase(luigi.WrapperTask):
         description="specifies the preferred order for catching up. False - work from the oldest missing outputs onward; True - from the newest backward")
     task_limit = luigi.IntParameter(
         default=50,
-        description="how many of 'of' tasks to require. Guards against hogging insane amounts of resources scheduling-wise")
+        description="how many of 'of' tasks to require. Guards against scheduling insane amounts of tasks in one go")
         # TODO vary based on cluster load (time of day)? Resources feature suits that better though
-    range_limit = luigi.IntParameter(
-        default=100 * 24,  # TODO prevent oldest outputs flapping when retention is shorter than this
-        description="maximal range over which consistency is assured, in datehours. Guards against infinite loops when start or stop is None")
-        # elaborate that it's the latest? FIXME make sure it's latest
-        # TODO infinite for reprocessings like anonymize
-        # future_limit, past_limit?
-        # hours_back, hours_forward? Measured from current time. Usually safe to increase, only worker's memory and time being the limit.
+    hours_back = luigi.IntParameter(
+        default=100 * 24,  # slightly more than three months
+        description="extent to which contiguousness is to be assured into past, in hours from current time. Prevents infinite loop when start is none. If the dataset has limited retention (i.e. old outputs get removed), this should be set shorter to that, too, to prevent the oldest outputs flapping. Increase freely if you intend to process old dates - worker's memory is the limit")
+        # TODO always entire interval for reprocessings (fixed start and stop)?
+    hours_forward = luigi.IntParameter(
+        default=24,
+        description="extent to which contiguousness is to be assured into future, in hours from current time. Prevents infinite loop when stop is none")
+    # TODO when generalizing for RangeDaily/Weekly, "hours_" will need to become something else... strict_back, always in seconds?
     # TODO overridable exclude_datehours or something...
+    now = luigi.IntParameter(
+        default=None,
+        description="set to override current time. In seconds since epoch")
 
     def missing_datehours(self, task_cls, finite_datehours):
         """Override in subclasses to do bulk checks.
@@ -90,25 +94,28 @@ class RangeHourlyBase(luigi.WrapperTask):
             raise ParameterException("Either start needs to be specified or reverse needs to be True")
         # TODO check overridden complete() and exists()
 
-        if self.reverse:
-            datehours = [self.stop + timedelta(hours=h) for h in range(-self.range_limit - 1, 0)]
-        else:
-            datehours = [self.start + timedelta(hours=h) for h in range(self.range_limit)]
+        now = datetime.utcfromtimestamp(time.time() if self.now is None else self.now)
+        now = datetime(now.year, now.month, now.day, now.hour)
+        datehours = [now + timedelta(hours=h) for h in range(-self.hours_back, self.hours_forward + 1)]
+        datehours = filter(lambda h: (not self.start or h >= self.start) and (not self.stop or h < self.stop), datehours)
 
-        logger.debug('Checking if range [%s, %s] of %s is complete' % (datehours[0], datehours[-1], self.of))
         task_cls = Register.get_task_cls(self.of)
-        missing_datehours = sorted(self.missing_datehours(task_cls, datehours))
-        logger.debug('Range [%s, %s) lacked %d of expected %d %s instances' % (datehours[0], datehours[-1], len(missing_datehours), len(datehours), self.of))
-        # obey task_limit
+        if datehours:
+            logger.debug('Checking if range [%s, %s] of %s is complete' % (datehours[0], datehours[-1], self.of))
+            missing_datehours = sorted(self.missing_datehours(task_cls, datehours))
+            logger.debug('Range [%s, %s) lacked %d of expected %d %s instances' % (datehours[0], datehours[-1], len(missing_datehours), len(datehours), self.of))
+        else:
+            missing_datehours = []
+
         if self.reverse:
             required_datehours = missing_datehours[-self.task_limit:]
         else:
             required_datehours = missing_datehours[:self.task_limit]
-        if len(required_datehours):
+        if required_datehours:
             logger.debug('Requiring %d missing %s instances in range [%s, %s]' % (len(required_datehours), self.of, required_datehours[0], required_datehours[-1]))
-
         if self.reverse:
             required_datehours.reverse()  # I wish this determined the order tasks were scheduled or executed, but it doesn't. No priorities in Luigi yet
+
         self._cached_requires = [task_cls(d) for d in required_datehours]
         return self._cached_requires
 
@@ -251,11 +258,11 @@ class RangeHourly(RangeHourlyBase):
         for (f, g), p in zip(filesystems_and_globs_by_location, zip(*paths_by_datehour)):  # transposed, so here we're iterating over logical outputs, not datehours
             listing |= self._list_existing(f, g, p)
 
+        print listing
         # quickly learn everything that's missing
         missing_datehours = []
         for d, p in zip(finite_datehours, paths_by_datehour):
-            if not self.stop or d < self.stop:  # hey, TODO in finite_datehours already
-                if not set(p) <= listing:
-                    missing_datehours.append(d)
+            if not set(p) <= listing:
+                missing_datehours.append(d)
 
         return missing_datehours
