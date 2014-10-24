@@ -231,14 +231,8 @@ class RangeHourlyBaseTest(unittest.TestCase):
             ]
         )]
 
-        durations = []
         for s in subcases:
-            start_time = time.time()
             subcase(*s)
-            durations.append(time.time() - start_time)
-        factor = max(durations) / min(durations)
-        self.assertTrue(factor < 5)  # runtimes shouldn't differ too much among cases which have few fixed_datehours passed to missing_datehours, despite hours_back or task_limit being orders of magnitude larger
-        # TODO something reading from disk, to strengthen this kind of a test to be an assertion that existence checks are in fact few
 
 
 class RangeHourlyTest(unittest.TestCase):

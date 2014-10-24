@@ -101,9 +101,9 @@ class RangeHourlyBase(luigi.WrapperTask):
 
         task_cls = Register.get_task_cls(self.of)
         if datehours:
-            logger.debug('Checking if range [%s, %s] of %s is complete' % (datehours[0], datehours[-1], self.of))
+            logger.debug('Actually checking if range [%s, %s] of %s is complete' % (datehours[0], datehours[-1], self.of))
             missing_datehours = sorted(self.missing_datehours(task_cls, datehours))
-            logger.debug('Range [%s, %s) lacked %d of expected %d %s instances' % (datehours[0], datehours[-1], len(missing_datehours), len(datehours), self.of))
+            logger.debug('Range [%s, %s] lacked %d of expected %d %s instances' % (datehours[0], datehours[-1], len(missing_datehours), len(datehours), self.of))
         else:
             missing_datehours = []
 
@@ -243,11 +243,13 @@ class RangeHourly(RangeHourlyBase):
     @classmethod
     def _list_existing(_, filesystem, glob, paths):
         globs = _constrain_glob(glob, paths)
-        logger.debug('Listing %s as %r' % (glob, globs))
         time_start = time.time()
-        listings = [list(filesystem.listdir(g)) for g in globs]
-        logger.debug('Listing took %f s to return %d items' % (time.time() - time_start, sum(map(len, listings))))
-        return set.union(*map(set, listings))
+        listing = []
+        for g in sorted(globs):
+            logger.debug('Listing %s' % g)
+            listing.extend(filesystem.listdir(g))
+        logger.debug('%d %s listings took %f s to return %d items' % (len(globs), filesystem.__class__.__name__, time.time() - time_start, len(listing)))
+        return set(listing)
 
     def missing_datehours(self, task_cls, finite_datehours):
         """Infers them by listing the task output target(s) filesystem.
@@ -258,7 +260,6 @@ class RangeHourly(RangeHourlyBase):
         for (f, g), p in zip(filesystems_and_globs_by_location, zip(*paths_by_datehour)):  # transposed, so here we're iterating over logical outputs, not datehours
             listing |= self._list_existing(f, g, p)
 
-        print listing
         # quickly learn everything that's missing
         missing_datehours = []
         for d, p in zip(finite_datehours, paths_by_datehour):
